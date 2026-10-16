@@ -4,16 +4,28 @@ from src.app.schemas.voice import Task, TaskCreate, TaskReplace, TaskUpdate
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
+tasks: list[dict[str, int | str | bool]] = []
+next_task_id = 1
+
 
 @router.get("", response_model=list[Task])
 def get_tasks() -> list[Task]:
-    raise_not_implemented("GET /tasks")
+    return [Task.model_validate(task) for task in tasks]
+    
 
 
 @router.post("", response_model=Task, status_code=status.HTTP_201_CREATED)
 def create_task(payload: TaskCreate) -> Task:
-    _ = payload
-    raise_not_implemented("POST /tasks")
+    global next_task_id
+
+    task = Task(
+        id=next_task_id,
+        title=payload.title,
+        done=payload.done,
+    )
+    tasks.append(task.model_dump())
+    next_task_id += 1
+    return task
 
 
 @router.put("/{task_id}", response_model=Task)
@@ -21,8 +33,21 @@ def replace_task(
     task_id: int,
     payload: TaskReplace,
 ) -> Task:
-    _ = (task_id, payload)
-    raise_not_implemented("PUT /tasks/{task_id}")
+    for index, task_data in enumerate(tasks):
+        if task_data["id"] == task_id:
+            replaced_task = Task(
+                id=task_data["id"],
+                title=payload.title,
+                done=payload.done,
+            )
+            tasks[index] = replaced_task.model_dump()
+            return replaced_task
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Task {task_id} not found",
+    )
+
 
 
 @router.patch("/{task_id}", response_model=Task)
@@ -30,18 +55,29 @@ def update_task(
     task_id: int,
     payload: TaskUpdate,
 ) -> Task:
-    _ = (task_id, payload)
-    raise_not_implemented("PATCH /tasks/{task_id}")
+    updates = payload.model_dump(exclude_unset=True, exclude_none=True)
 
+    for index, task_data in enumerate(tasks):
+        task = Task.model_validate(task_data)
+        if task.id == task_id:
+            updated_task = task.model_copy(update=updates)
+            tasks[index] = updated_task.model_dump()
+            return updated_task
 
-@router.delete("/{task_id}")
-def delete_task(task_id: int) -> dict[str, str]:
-    _ = task_id
-    raise_not_implemented("DELETE /tasks/{task_id}")
-
-
-def raise_not_implemented(endpoint: str) -> None:
     raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail=f"Template endpoint pending implementation: {endpoint}",
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Task {task_id} not found",
+    )
+
+
+@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_task(task_id: int) -> None:
+    for index, task in enumerate(tasks):
+        if task["id"] == task_id:
+            del tasks[index]
+            return
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Task {task_id} not found",
     )

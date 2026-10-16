@@ -114,7 +114,17 @@ git remote set-url origin https://github.com/TU_USUARIO/TU_REPOSITORIO
 
 ### Configuracion del backend
 
-Crea un archivo `.env` a partir de `.env.example` y agrega tus credenciales de Groq.
+Configura un archivo `.env` con las variables necesarias para los proveedores. En este workspace, Groq se usa para transcribir audio y LUNA para generar las instrucciones. El enunciado original propone Groq para el routing; aqui se usa LUNA porque es el proveedor habilitado para la cuenta configurada.
+
+```env
+GROQ_API_KEY=tu_clave_de_groq
+GROQ_TRANSCRIPTION_MODEL=whisper-large-v3-turbo
+LUNA_API_KEY=tu_clave_de_luna
+LUNA_URL_BASE=https://llm.4geeks.ai
+LUNA_MODEL=online/openrouter/openai/gpt-6-luna
+```
+
+No subas `.env` al repositorio ni compartas las claves.
 
 Instala dependencias y ejecuta la API:
 
@@ -190,6 +200,84 @@ Si la transcripcion esta bien pero la accion sale mal, el problema esta en `/ins
 - [ ] `POST /instruction` recibe texto plano y devuelve solo JSON de routing (sin ejecutar acciones).
 - [ ] `GET /tasks`, `POST /tasks`, `PUT /tasks/{task_id}`, `PATCH /tasks/{task_id}` y `DELETE /tasks/{task_id}` funcionan correctamente con memoria en proceso.
 - [ ] El frontend muestra la transcripcion devuelta por el backend para distinguir errores de STT vs. errores de routing.
+
+---
+
+## Guia paso a paso de la implementacion
+
+Esta seccion explica como se conectan las piezas del backend y que aprende cada una. La interfaz incluida en este repositorio graba audio con `MediaRecorder` y llama a `POST /transcribe`; no llama directamente a `/instruction` para hacer una segunda peticion.
+
+### 1. Configurar las credenciales y los modelos
+
+La aplicacion carga desde `.env` las variables descritas en la configuracion del backend. No compartas ni subas las claves. En esta implementacion, Groq/Whisper convierte el audio en texto y LUNA interpreta ese texto para elegir una accion. El identificador del modelo LUNA se normaliza para quitar el prefijo `litellm/` si aparece en la configuracion.
+
+### 2. Guardar tareas en memoria
+
+En `src/app/api/routes/tasks.py`, la lista de modulo `tasks` guarda diccionarios con `id`, `title` y `done`. `next_task_id` asigna IDs consecutivos. Como no hay base de datos, las tareas se reinician cuando se reinicia el servidor.
+
+Las rutas CRUD usan esa misma lista:
+
+- `GET /tasks` devuelve todas las tareas.
+- `POST /tasks` valida `title`, permite `done` opcional y devuelve `201` con la tarea creada.
+- `PUT /tasks/{task_id}` reemplaza `title` y `done`; devuelve `404` si no existe el ID.
+- `PATCH /tasks/{task_id}` actualiza solo los campos enviados.
+- `DELETE /tasks/{task_id}` devuelve `204` sin cuerpo al eliminar y `404` si no encuentra la tarea.
+
+### 3. Convertir texto en una instruccion
+
+`POST /instruction` recibe un cuerpo JSON como:
+
+```json
+{ "transcription": "Añade comprar leche a mi lista" }
+```
+
+El servicio `src/app/services/voice.py` envia el texto y las tareas actuales al modelo LUNA. El prompt pide solo JSON; despues, el backend valida que el endpoint y el metodo pertenezcan a las operaciones de tareas admitidas. Esta ruta devuelve el plan, pero no ejecuta la accion.
+
+Respuesta de ejemplo:
+
+```json
+{
+  "endpoint": "/tasks",
+  "method": "POST",
+  "params": { "title": "Comprar leche" }
+}
+```
+
+### 4. Procesar el audio que envia la interfaz
+
+`POST /transcribe` admite dos entradas para cubrir la interfaz completa:
+
+1. Audio `multipart/form-data`, en el campo `file`; puede incluir `language`.
+2. JSON con `transcription`, para el modo de transcripcion manual.
+
+Para audio, Groq/Whisper devuelve el texto. Luego el backend reutiliza el servicio de routing, ejecuta la operacion sobre las tareas y responde con `transcription`, `instruction` y `result`. Asi el frontend puede mostrar tanto lo que entendio como el resultado de la accion.
+
+```json
+{
+  "transcription": "Añade comprar leche a mi lista",
+  "instruction": {
+    "endpoint": "/tasks",
+    "method": "POST",
+    "params": { "title": "Comprar leche" }
+  },
+  "result": { "id": 1, "title": "Comprar leche", "done": false }
+}
+```
+
+### 5. Ejecutar el routing sin duplicar el CRUD
+
+`execute_instruction` traduce el JSON validado a una llamada a la funcion CRUD correspondiente. Por ejemplo, `POST /tasks` crea una tarea en memoria. El modelo propone la operacion; el backend valida sus parametros y realiza la accion. No se usan reglas como `if "añade" in transcription`.
+
+### 6. Permitir la conexion desde el frontend
+
+`src/app/main.py` configura CORS para los origenes locales y para el dominio de Codespaces usado por Vite en el puerto `5173`. Si ejecutas el frontend en otro puerto o dominio, agrega su origen a `ALLOWED_ORIGINS` o ajusta `ALLOWED_ORIGIN_REGEX` en la configuracion; no habilites cualquier origen sin necesidad.
+
+### 7. Interpretar errores frecuentes
+
+- `422`: falta un campo o el routing/parametro no es valido.
+- `404`: el ID de tarea solicitado no existe.
+- `502`: el proveedor de transcripcion o de routing rechazo la solicitud o no respondio. Revisa la terminal del backend; el log indica que proveedor y modelo fallaron, sin imprimir las claves.
+- Error CORS en el navegador: comprueba el origen exacto del frontend, el puerto publicado y que el backend se haya reiniciado despues de cambiar la configuracion.
 
 ---
 
